@@ -1,0 +1,1295 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Битва в Пустыне</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', Arial, sans-serif; }
+canvas { display: block; cursor: crosshair; }
+#ui-overlay {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 10;
+}
+#alive-count {
+  position: fixed; top: 15px; right: 15px;
+  color: #fff; font-size: 20px; font-weight: bold;
+  background: rgba(0,0,0,0.6); padding: 8px 16px; border-radius: 10px;
+  z-index: 11;
+}
+#killfeed {
+  position: fixed; top: 15px; left: 15px;
+  color: #fff; font-size: 14px; z-index: 11;
+}
+.kill-msg {
+  background: rgba(0,0,0,0.6); padding: 4px 10px; border-radius: 6px;
+  margin-bottom: 4px; white-space: nowrap;
+  animation: fadeIn 0.3s ease;
+}
+@keyframes fadeIn { from { opacity: 0; transform: translateX(-20px); } to { opacity: 1; transform: translateX(0); } }
+#inventory-bar {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 6px; z-index: 11;
+}
+.inv-slot {
+  width: 56px; height: 56px; background: rgba(0,0,0,0.7);
+  border: 2px solid #555; border-radius: 10px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  color: #fff; font-size: 22px; position: relative;
+}
+.inv-slot.active { border-color: #e94560; box-shadow: 0 0 10px rgba(233,69,96,0.5); }
+.inv-slot .key-hint {
+  position: absolute; top: 2px; left: 6px; font-size: 10px; color: #aaa;
+}
+.inv-slot .item-name {
+  font-size: 8px; color: #ccc; margin-top: 2px; text-align: center; line-height: 1;
+}
+#controls-hint {
+  position: fixed; bottom: 85px; left: 50%; transform: translateX(-50%);
+  color: rgba(255,255,255,0.4); font-size: 11px; z-index: 11; white-space: nowrap;
+}
+#center-msg {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  color: #fff; font-size: 48px; font-weight: bold; text-align: center;
+  text-shadow: 3px 3px 6px rgba(0,0,0,0.8); z-index: 20; display: none;
+  line-height: 1.4;
+}
+#center-msg .sub { font-size: 20px; font-weight: normal; color: #ccc; }
+#hp-bar-container {
+  position: fixed; bottom: 85px; left: 50%; transform: translateX(-50%);
+  width: 240px; height: 14px; background: rgba(0,0,0,0.6); border-radius: 7px;
+  overflow: hidden; z-index: 11; margin-bottom: 25px;
+}
+#hp-bar {
+  height: 100%; background: linear-gradient(90deg, #e94560, #ff6b6b);
+  border-radius: 7px; transition: width 0.3s ease;
+}
+#hp-text {
+  position: fixed; bottom: 127px; left: 50%; transform: translateX(-50%);
+  color: #fff; font-size: 13px; font-weight: bold; z-index: 11;
+}
+#effects-bar {
+  position: fixed; bottom: 150px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 8px; z-index: 11;
+}
+.effect-icon {
+  background: rgba(0,0,0,0.6); padding: 4px 8px; border-radius: 6px;
+  color: #fff; font-size: 14px;
+}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="alive-count"></div>
+<div id="killfeed"></div>
+<div id="hp-bar-container"><div id="hp-bar"></div></div>
+<div id="hp-text"></div>
+<div id="effects-bar"></div>
+<div id="inventory-bar"></div>
+<div id="controls-hint"></div>
+<div id="center-msg"></div>
+
+<script>
+// ============================================================
+// CANVAS SETUP
+// ============================================================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const MAP_W = 3000;
+const MAP_H = 3000;
+const PLAYER_R = 16;
+const CHEST_SIZE = 26;
+const NUM_BOTS = 10;
+const NUM_CHESTS = 50;
+const MAX_HP = 10;
+const INV_SIZE = 4;
+const ZONE_DMG_INTERVAL = 60; // frames between zone damage ticks
+const ZONE_SHRINK_SPEED = 0.4;
+const PICKUP_RANGE = 40;
+const BOT_PICKUP_RANGE = 30;
+
+// ============================================================
+// DIFFICULTY SETTINGS
+// ============================================================
+const DIFFICULTIES = {
+  easy: {
+    label: 'Easy', desc: 'More HP, slower bots, more loot',
+    playerHp: 15, playerSpeed: 3.0,
+    botSpeed: 2.0, botCdMult: 1.6, botAiBase: 50, botAiRand: 40,
+    botAggrMin: 0, botAggrMax: 0.35, numChests: 65,
+    botDmgMult: 0.6, emptyChance: 0.12,
+  },
+  normal: {
+    label: 'Normal', desc: 'Balanced experience',
+    playerHp: 10, playerSpeed: 2.5,
+    botSpeed: 2.5, botCdMult: 1.0, botAiBase: 30, botAiRand: 30,
+    botAggrMin: 0, botAggrMax: 1.0, numChests: 50,
+    botDmgMult: 1.0, emptyChance: 0.25,
+  },
+  hard: {
+    label: 'Hard', desc: 'Less HP, fast aggressive bots',
+    playerHp: 8, playerSpeed: 2.5,
+    botSpeed: 3.2, botCdMult: 0.6, botAiBase: 12, botAiRand: 15,
+    botAggrMin: 0.5, botAggrMax: 1.0, numChests: 38,
+    botDmgMult: 1.5, emptyChance: 0.35,
+  },
+};
+let diff = DIFFICULTIES.normal;
+
+// ============================================================
+// ITEM DEFINITIONS
+// ============================================================
+const WEAPONS = [
+  { name: 'Knife', emoji: '\u{1F5E1}', damage: 1, range: 42, cooldown: 18, type: 'weapon', tier: 0 },
+  { name: 'Sword', emoji: '\u{2694}', damage: 2, range: 55, cooldown: 30, type: 'weapon', tier: 1 },
+  { name: 'Axe', emoji: '\u{1FA93}', damage: 3, range: 50, cooldown: 50, type: 'weapon', tier: 2 },
+  { name: 'Bow', emoji: '\u{1F3F9}', damage: 2, range: 280, cooldown: 40, type: 'weapon', ranged: true, tier: 1 },
+];
+const CONSUMABLES = [
+  { name: 'Heal', emoji: '\u{2764}', type: 'consumable', effect: 'heal', value: 4 },
+  { name: 'Speed', emoji: '\u{1F4A8}', type: 'consumable', effect: 'speed', duration: 300 },
+  { name: 'Shield', emoji: '\u{1F6E1}', type: 'consumable', effect: 'shield', duration: 480 },
+  { name: 'Dynamite', emoji: '\u{1F4A3}', type: 'throwable', damage: 3, radius: 90 },
+];
+
+function genLoot() {
+  const r = Math.random();
+  if (r < diff.emptyChance) return null;
+  if (r < 0.65) return { ...WEAPONS[Math.floor(Math.random() * WEAPONS.length)] };
+  return { ...CONSUMABLES[Math.floor(Math.random() * CONSUMABLES.length)] };
+}
+
+// ============================================================
+// COLORS & NAMES
+// ============================================================
+const COLORS = [
+  '#e94560','#0f3460','#16c79a','#f5a623','#8b5cf6',
+  '#ec4899','#06b6d4','#84cc16','#f97316','#6366f1','#ef4444'
+];
+const BOT_NAMES = [
+  'Scorpion','Cobra','Jackal','Hawk','Viper',
+  'Fennec','Mirage','Storm','Sahara','Dune'
+];
+
+// ============================================================
+// UTILITIES
+// ============================================================
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+function ang(a, b) { return Math.atan2(b.y - a.y, b.x - a.x); }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function rand(a, b) { return Math.random() * (b - a) + a; }
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// ============================================================
+// GAME STATE
+// ============================================================
+let game, keys = {}, frame = 0, gamePhase = 'start'; // start, playing, over
+let screenShake = { x: 0, y: 0, intensity: 0 };
+
+function createPlayer(x, y, name, color, isBot) {
+  const hp = isBot ? MAX_HP : diff.playerHp;
+  return {
+    x, y, hp, maxHp: hp,
+    inv: [null, null, null, null],
+    slot: 0, dir: 0,
+    speed: isBot ? diff.botSpeed : diff.playerSpeed,
+    color, name, isBot, alive: true,
+    atkCD: 0, atkAnim: 0,
+    cdMult: isBot ? diff.botCdMult : 1.0,
+    dmgMult: isBot ? diff.botDmgMult : 1.0,
+    fx: { speed: 0, shield: 0 },
+    // Bot AI
+    aiState: 'WANDER', aiTimer: 0, aiTarget: null,
+    wanderDir: Math.random() * Math.PI * 2,
+    personality: isBot ? rand(diff.botAggrMin, diff.botAggrMax) : 0,
+    kills: 0,
+  };
+}
+
+function initGame() {
+  game = {
+    players: [], chests: [], projectiles: [], particles: [],
+    decos: [], killfeed: [], floatingTexts: [],
+    zone: { x: MAP_W / 2, y: MAP_H / 2, radius: 1800, targetRadius: 1800, shrinking: false, warned: false },
+    camera: { x: 0, y: 0 },
+    zoneDmgTimer: 0,
+  };
+  frame = 0;
+
+  // Player
+  const px = rand(300, MAP_W - 300), py = rand(300, MAP_H - 300);
+  game.players.push(createPlayer(px, py, 'You', COLORS[0], false));
+
+  // Bots
+  for (let i = 0; i < NUM_BOTS; i++) {
+    let bx, by, tries = 0;
+    do {
+      bx = rand(200, MAP_W - 200);
+      by = rand(200, MAP_H - 200);
+      tries++;
+    } while (tries < 50 && game.players.some(p => dist({ x: bx, y: by }, p) < 250));
+    game.players.push(createPlayer(bx, by, BOT_NAMES[i], COLORS[i + 1], true));
+  }
+
+  // Chests
+  for (let i = 0; i < diff.numChests; i++) {
+    game.chests.push({
+      x: rand(80, MAP_W - 80), y: rand(80, MAP_H - 80),
+      opened: false, item: genLoot(),
+    });
+  }
+
+  // Decorations
+  for (let i = 0; i < 60; i++) {
+    game.decos.push({
+      x: rand(30, MAP_W - 30), y: rand(30, MAP_H - 30),
+      type: Math.random() < 0.4 ? 'cactus' : 'rock',
+      size: rand(8, 22), shade: rand(0.8, 1.2),
+    });
+  }
+  // Sand dunes
+  for (let i = 0; i < 25; i++) {
+    game.decos.push({
+      x: rand(0, MAP_W), y: rand(0, MAP_H),
+      type: 'dune', size: rand(60, 180), shade: rand(0.9, 1.1),
+    });
+  }
+
+  updateUI();
+}
+
+// ============================================================
+// INPUT
+// ============================================================
+function startGame(difficulty) {
+  diff = DIFFICULTIES[difficulty];
+  gamePhase = 'playing';
+  initGame();
+  document.getElementById('center-msg').style.display = 'none';
+  document.getElementById('controls-hint').textContent =
+    'Arrows: Move | Space: Attack | E: Open Chest | 1-4: Select/Use Item | Difficulty: ' + diff.label;
+  requestAnimationFrame(gameLoop);
+}
+
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (gamePhase === 'start') {
+    if (e.code === 'Digit1') { startGame('easy'); return; }
+    if (e.code === 'Digit2') { startGame('normal'); return; }
+    if (e.code === 'Digit3') { startGame('hard'); return; }
+    return;
+  }
+  if (gamePhase === 'over' && e.code === 'KeyR') {
+    gamePhase = 'playing';
+    initGame();
+    document.getElementById('center-msg').style.display = 'none';
+    return;
+  }
+  if (gamePhase === 'over' && e.code === 'KeyM') {
+    showStart();
+    return;
+  }
+  if (gamePhase !== 'playing') return;
+  const player = game.players[0];
+  if (!player.alive) return;
+
+  // Inventory slot selection / use consumable
+  if (e.code >= 'Digit1' && e.code <= 'Digit4') {
+    const s = parseInt(e.code[5]) - 1;
+    if (player.inv[s]) {
+      if (player.inv[s].type === 'consumable') {
+        useConsumable(player, s);
+      } else {
+        player.slot = s;
+      }
+    }
+    updateUI();
+  }
+  // Open chest
+  if (e.code === 'KeyE') {
+    tryOpenChest(player);
+  }
+  // Attack
+  if (e.code === 'Space') {
+    e.preventDefault();
+    tryAttack(player);
+  }
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ============================================================
+// PLAYER ACTIONS
+// ============================================================
+function tryOpenChest(p) {
+  for (const c of game.chests) {
+    if (c.opened) continue;
+    if (dist(p, c) < PICKUP_RANGE) {
+      c.opened = true;
+      spawnParticles(c.x, c.y, '#ffd700', 8, 3);
+      if (c.item) {
+        const emptySlot = p.inv.indexOf(null);
+        if (emptySlot !== -1) {
+          p.inv[emptySlot] = c.item;
+          if (c.item.type === 'weapon' && (!getWeapon(p) || c.item.tier > getWeapon(p).tier)) {
+            p.slot = emptySlot;
+          }
+          addFloatingText(p.x, p.y - 30, c.item.emoji + ' ' + c.item.name, '#ffd700');
+        }
+      } else {
+        addFloatingText(c.x, c.y - 20, 'Empty', '#888');
+      }
+      updateUI();
+      return;
+    }
+  }
+}
+
+function getWeapon(p) {
+  const item = p.inv[p.slot];
+  return (item && item.type === 'weapon') ? item : null;
+}
+
+function getBestWeaponSlot(p) {
+  let best = -1, bestTier = -1;
+  for (let i = 0; i < INV_SIZE; i++) {
+    if (p.inv[i] && p.inv[i].type === 'weapon' && p.inv[i].tier > bestTier) {
+      bestTier = p.inv[i].tier;
+      best = i;
+    }
+  }
+  return best;
+}
+
+function tryAttack(p) {
+  if (p.atkCD > 0) return;
+  const weapon = getWeapon(p);
+  if (!weapon) return;
+  p.atkCD = Math.round(weapon.cooldown * (p.cdMult || 1));
+  p.atkAnim = Math.min(weapon.cooldown, 15);
+
+  if (weapon.ranged) {
+    // Shoot projectile
+    const speed = 7;
+    game.projectiles.push({
+      x: p.x + Math.cos(p.dir) * 20,
+      y: p.y + Math.sin(p.dir) * 20,
+      vx: Math.cos(p.dir) * speed,
+      vy: Math.sin(p.dir) * speed,
+      damage: weapon.damage, owner: p, life: 50,
+    });
+  } else {
+    // Melee hit
+    for (const enemy of game.players) {
+      if (enemy === p || !enemy.alive) continue;
+      const d = dist(p, enemy);
+      if (d < weapon.range + PLAYER_R) {
+        const a = ang(p, enemy);
+        let da = a - p.dir;
+        while (da > Math.PI) da -= Math.PI * 2;
+        while (da < -Math.PI) da += Math.PI * 2;
+        if (Math.abs(da) < Math.PI * 0.6) {
+          dealDamage(enemy, weapon.damage, p);
+        }
+      }
+    }
+  }
+}
+
+function useConsumable(p, slot) {
+  const item = p.inv[slot];
+  if (!item) return;
+  if (item.effect === 'heal') {
+    p.hp = Math.min(p.maxHp, p.hp + item.value);
+    spawnParticles(p.x, p.y, '#4ade80', 10, 2);
+    addFloatingText(p.x, p.y - 30, '+' + item.value + ' HP', '#4ade80');
+  } else if (item.effect === 'speed') {
+    p.fx.speed = item.duration;
+    spawnParticles(p.x, p.y, '#38bdf8', 8, 2);
+    addFloatingText(p.x, p.y - 30, 'Speed!', '#38bdf8');
+  } else if (item.effect === 'shield') {
+    p.fx.shield = item.duration;
+    spawnParticles(p.x, p.y, '#a78bfa', 8, 2);
+    addFloatingText(p.x, p.y - 30, 'Shield!', '#a78bfa');
+  } else if (item.type === 'throwable') {
+    // Throw dynamite
+    const speed = 5;
+    game.projectiles.push({
+      x: p.x + Math.cos(p.dir) * 20,
+      y: p.y + Math.sin(p.dir) * 20,
+      vx: Math.cos(p.dir) * speed,
+      vy: Math.sin(p.dir) * speed,
+      damage: item.damage, radius: item.radius, owner: p, life: 40,
+      explosive: true,
+    });
+  }
+  p.inv[slot] = null;
+  // Switch to weapon slot after using consumable
+  const ws = getBestWeaponSlot(p);
+  if (ws >= 0) p.slot = ws;
+  updateUI();
+}
+
+function dealDamage(target, dmg, attacker) {
+  if (attacker && attacker.dmgMult) dmg = Math.max(1, Math.round(dmg * attacker.dmgMult));
+  if (target.fx.shield > 0) dmg = Math.max(1, Math.floor(dmg / 2));
+  target.hp -= dmg;
+  spawnParticles(target.x, target.y, '#ef4444', 6, 2);
+  addFloatingText(target.x, target.y - 25, '-' + dmg, '#ef4444');
+
+  if (target === game.players[0]) {
+    screenShake.intensity = 8;
+  }
+
+  if (target.hp <= 0) {
+    target.hp = 0;
+    target.alive = false;
+    spawnParticles(target.x, target.y, target.color, 25, 4);
+    if (attacker) {
+      attacker.kills++;
+      addKill(attacker.name, target.name, attacker.color, target.color);
+    }
+    // Drop items
+    for (let i = 0; i < INV_SIZE; i++) {
+      if (target.inv[i]) {
+        game.chests.push({
+          x: target.x + rand(-30, 30), y: target.y + rand(-30, 30),
+          opened: false, item: { ...target.inv[i] },
+        });
+        target.inv[i] = null;
+      }
+    }
+    checkGameState();
+  }
+  updateUI();
+}
+
+// ============================================================
+// BOT AI
+// ============================================================
+function updateBot(bot) {
+  if (!bot.alive) return;
+  bot.aiTimer--;
+  if (bot.atkCD > 0) bot.atkCD--;
+
+  // Decrease effects
+  if (bot.fx.speed > 0) bot.fx.speed--;
+  if (bot.fx.shield > 0) bot.fx.shield--;
+
+  const aliveEnemies = game.players.filter(p => p !== bot && p.alive);
+  const nearest = findNearest(bot, aliveEnemies);
+  const nearestDist = nearest ? dist(bot, nearest) : Infinity;
+  const nearestChest = findNearestChest(bot);
+  const chestDist = nearestChest ? dist(bot, nearestChest) : Infinity;
+  const hasWeapon = getBestWeaponSlot(bot) >= 0;
+  const inZone = isInZone(bot);
+
+  // Use heal potion if low HP
+  if (bot.hp <= 4) {
+    const healSlot = bot.inv.findIndex(i => i && i.effect === 'heal');
+    if (healSlot >= 0) useConsumable(bot, healSlot);
+  }
+
+  // Use shield if enemy near and fighting
+  if (nearestDist < 150 && bot.fx.shield <= 0) {
+    const shieldSlot = bot.inv.findIndex(i => i && i.effect === 'shield');
+    if (shieldSlot >= 0) useConsumable(bot, shieldSlot);
+  }
+
+  // Use speed if fleeing or chasing
+  if ((bot.aiState === 'FLEE' || bot.aiState === 'ATTACK') && bot.fx.speed <= 0) {
+    const speedSlot = bot.inv.findIndex(i => i && i.effect === 'speed');
+    if (speedSlot >= 0 && Math.random() < 0.3) useConsumable(bot, speedSlot);
+  }
+
+  // Equip best weapon
+  const ws = getBestWeaponSlot(bot);
+  if (ws >= 0) bot.slot = ws;
+
+  // Decide state
+  if (bot.aiTimer <= 0) {
+    bot.aiTimer = diff.botAiBase + Math.floor(Math.random() * diff.botAiRand);
+
+    if (!inZone) {
+      bot.aiState = 'FLEE_ZONE';
+    } else if (bot.hp <= 3 && nearestDist < 200) {
+      bot.aiState = 'FLEE';
+      bot.aiTarget = nearest;
+    } else if (hasWeapon && nearestDist < 250 && (bot.personality > 0.4 || bot.hp > 5)) {
+      bot.aiState = 'ATTACK';
+      bot.aiTarget = nearest;
+    } else if (chestDist < 500 && (!hasWeapon || bot.inv.includes(null))) {
+      bot.aiState = 'SEEK_CHEST';
+      bot.aiTarget = nearestChest;
+    } else if (hasWeapon && nearestDist < 400) {
+      bot.aiState = 'ATTACK';
+      bot.aiTarget = nearest;
+    } else {
+      bot.aiState = 'WANDER';
+      bot.wanderDir = Math.random() * Math.PI * 2;
+    }
+  }
+
+  const spd = bot.speed * (bot.fx.speed > 0 ? 1.8 : 1);
+
+  // Execute state
+  switch (bot.aiState) {
+    case 'WANDER': {
+      bot.x += Math.cos(bot.wanderDir) * spd * 0.6;
+      bot.y += Math.sin(bot.wanderDir) * spd * 0.6;
+      bot.dir = bot.wanderDir;
+      if (Math.random() < 0.02) bot.wanderDir += rand(-1, 1);
+      // Try to pick up nearby chest
+      for (const c of game.chests) {
+        if (!c.opened && dist(bot, c) < BOT_PICKUP_RANGE) {
+          tryBotOpenChest(bot, c);
+        }
+      }
+      break;
+    }
+    case 'SEEK_CHEST': {
+      if (!bot.aiTarget || bot.aiTarget.opened) { bot.aiTimer = 0; break; }
+      const a = ang(bot, bot.aiTarget);
+      bot.x += Math.cos(a) * spd;
+      bot.y += Math.sin(a) * spd;
+      bot.dir = a;
+      if (dist(bot, bot.aiTarget) < BOT_PICKUP_RANGE) {
+        tryBotOpenChest(bot, bot.aiTarget);
+        bot.aiTimer = 0;
+      }
+      break;
+    }
+    case 'ATTACK': {
+      if (!bot.aiTarget || !bot.aiTarget.alive) { bot.aiTimer = 0; break; }
+      const a = ang(bot, bot.aiTarget);
+      bot.dir = a;
+      const weapon = getWeapon(bot);
+      const attackRange = weapon ? (weapon.ranged ? 200 : weapon.range) : 40;
+
+      // Throw dynamite if close enough
+      if (nearestDist < 120) {
+        const dynSlot = bot.inv.findIndex(i => i && i.type === 'throwable');
+        if (dynSlot >= 0) useConsumable(bot, dynSlot);
+      }
+
+      if (nearestDist > attackRange + 10) {
+        bot.x += Math.cos(a) * spd;
+        bot.y += Math.sin(a) * spd;
+      } else {
+        tryAttack(bot);
+      }
+      // Pick up chests along the way
+      for (const c of game.chests) {
+        if (!c.opened && dist(bot, c) < BOT_PICKUP_RANGE) {
+          tryBotOpenChest(bot, c);
+        }
+      }
+      break;
+    }
+    case 'FLEE': {
+      if (!bot.aiTarget || !bot.aiTarget.alive) { bot.aiTimer = 0; break; }
+      const a = ang(bot, bot.aiTarget) + Math.PI; // run away
+      bot.x += Math.cos(a) * spd * 1.1;
+      bot.y += Math.sin(a) * spd * 1.1;
+      bot.dir = a;
+      break;
+    }
+    case 'FLEE_ZONE': {
+      const a = ang(bot, game.zone);
+      bot.x += Math.cos(a) * spd * 1.2;
+      bot.y += Math.sin(a) * spd * 1.2;
+      bot.dir = a;
+      if (isInZone(bot)) bot.aiTimer = 0;
+      break;
+    }
+  }
+
+  // Clamp to map
+  bot.x = clamp(bot.x, PLAYER_R, MAP_W - PLAYER_R);
+  bot.y = clamp(bot.y, PLAYER_R, MAP_H - PLAYER_R);
+}
+
+function tryBotOpenChest(bot, chest) {
+  if (chest.opened) return;
+  chest.opened = true;
+  spawnParticles(chest.x, chest.y, '#ffd700', 6, 2);
+  if (chest.item) {
+    const emptySlot = bot.inv.indexOf(null);
+    if (emptySlot !== -1) {
+      bot.inv[emptySlot] = chest.item;
+    }
+  }
+}
+
+function findNearest(p, list) {
+  let best = null, bestD = Infinity;
+  for (const e of list) {
+    const d = dist(p, e);
+    if (d < bestD) { bestD = d; best = e; }
+  }
+  return best;
+}
+
+function findNearestChest(p) {
+  let best = null, bestD = Infinity;
+  for (const c of game.chests) {
+    if (c.opened) continue;
+    const d = dist(p, c);
+    if (d < bestD) { bestD = d; best = c; }
+  }
+  return best;
+}
+
+// ============================================================
+// ZONE
+// ============================================================
+function isInZone(p) {
+  return dist(p, game.zone) <= game.zone.radius;
+}
+
+function updateZone() {
+  const alive = game.players.filter(p => p.alive).length;
+  if (alive <= 4 && !game.zone.shrinking) {
+    game.zone.shrinking = true;
+    game.zone.targetRadius = 400;
+    if (!game.zone.warned) {
+      game.zone.warned = true;
+      addFloatingText(game.players[0].x, game.players[0].y - 60, 'Zone shrinking!', '#ff4444');
+    }
+  }
+  if (alive <= 2 && game.zone.targetRadius > 150) {
+    game.zone.targetRadius = 150;
+  }
+
+  if (game.zone.shrinking && game.zone.radius > game.zone.targetRadius) {
+    game.zone.radius -= ZONE_SHRINK_SPEED;
+    if (game.zone.radius < game.zone.targetRadius) game.zone.radius = game.zone.targetRadius;
+  }
+
+  // Zone damage
+  game.zoneDmgTimer++;
+  if (game.zoneDmgTimer >= ZONE_DMG_INTERVAL) {
+    game.zoneDmgTimer = 0;
+    for (const p of game.players) {
+      if (p.alive && !isInZone(p)) {
+        dealDamage(p, 1, null);
+        spawnParticles(p.x, p.y, '#9333ea', 4, 1.5);
+      }
+    }
+  }
+}
+
+// ============================================================
+// PROJECTILES
+// ============================================================
+function updateProjectiles() {
+  for (let i = game.projectiles.length - 1; i >= 0; i--) {
+    const pr = game.projectiles[i];
+    pr.x += pr.vx;
+    pr.y += pr.vy;
+    pr.life--;
+
+    if (pr.explosive && pr.life <= 0) {
+      // Explode
+      spawnParticles(pr.x, pr.y, '#f97316', 20, 5);
+      spawnParticles(pr.x, pr.y, '#ef4444', 15, 4);
+      screenShake.intensity = 12;
+      for (const p of game.players) {
+        if (!p.alive) continue;
+        if (dist(p, pr) < pr.radius) {
+          dealDamage(p, pr.damage, pr.owner);
+        }
+      }
+      game.projectiles.splice(i, 1);
+      continue;
+    }
+
+    // Check collision with players
+    if (!pr.explosive) {
+      for (const p of game.players) {
+        if (p === pr.owner || !p.alive) continue;
+        if (dist(p, pr) < PLAYER_R + 5) {
+          dealDamage(p, pr.damage, pr.owner);
+          game.projectiles.splice(i, 1);
+          break;
+        }
+      }
+    }
+
+    // Remove if expired or out of bounds
+    if (pr.life <= 0 || pr.x < 0 || pr.x > MAP_W || pr.y < 0 || pr.y > MAP_H) {
+      game.projectiles.splice(i, 1);
+    }
+  }
+}
+
+// ============================================================
+// PARTICLES & EFFECTS
+// ============================================================
+function spawnParticles(x, y, color, count, speed) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = Math.random() * speed + 0.5;
+    game.particles.push({
+      x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+      life: 30 + Math.random() * 20, maxLife: 50,
+      color, size: 2 + Math.random() * 3,
+    });
+  }
+}
+
+function addFloatingText(x, y, text, color) {
+  game.floatingTexts.push({ x, y, text, color, life: 60 });
+}
+
+function updateParticles() {
+  for (let i = game.particles.length - 1; i >= 0; i--) {
+    const p = game.particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.96;
+    p.vy *= 0.96;
+    p.life--;
+    if (p.life <= 0) game.particles.splice(i, 1);
+  }
+  for (let i = game.floatingTexts.length - 1; i >= 0; i--) {
+    const ft = game.floatingTexts[i];
+    ft.y -= 0.8;
+    ft.life--;
+    if (ft.life <= 0) game.floatingTexts.splice(i, 1);
+  }
+}
+
+// ============================================================
+// SCREEN SHAKE
+// ============================================================
+function updateShake() {
+  if (screenShake.intensity > 0) {
+    screenShake.x = (Math.random() - 0.5) * screenShake.intensity;
+    screenShake.y = (Math.random() - 0.5) * screenShake.intensity;
+    screenShake.intensity *= 0.88;
+    if (screenShake.intensity < 0.3) screenShake.intensity = 0;
+  } else {
+    screenShake.x = 0;
+    screenShake.y = 0;
+  }
+}
+
+// ============================================================
+// KILL FEED
+// ============================================================
+function addKill(killer, victim, kColor, vColor) {
+  game.killfeed.unshift({ killer, victim, kColor, vColor, life: 300 });
+  if (game.killfeed.length > 5) game.killfeed.pop();
+}
+
+function updateKillfeed() {
+  for (let i = game.killfeed.length - 1; i >= 0; i--) {
+    game.killfeed[i].life--;
+    if (game.killfeed[i].life <= 0) game.killfeed.splice(i, 1);
+  }
+}
+
+// ============================================================
+// GAME STATE CHECKS
+// ============================================================
+function checkGameState() {
+  const alive = game.players.filter(p => p.alive);
+  if (alive.length <= 1) {
+    gamePhase = 'over';
+    const msg = document.getElementById('center-msg');
+    if (alive.length === 1 && alive[0] === game.players[0]) {
+      msg.innerHTML = 'VICTORY!<br><span class="sub">You are the last one standing<br>Press R to restart | M for menu</span>';
+    } else if (!game.players[0].alive) {
+      const winner = alive[0] ? alive[0].name : '???';
+      msg.innerHTML = 'DEFEAT<br><span class="sub">' + winner + ' wins<br>Press R to restart | M for menu</span>';
+    }
+    msg.style.display = 'block';
+  }
+}
+
+// ============================================================
+// CAMERA
+// ============================================================
+function updateCamera() {
+  const p = game.players[0];
+  const tx = p.x - canvas.width / 2;
+  const ty = p.y - canvas.height / 2;
+  game.camera.x = lerp(game.camera.x, tx, 0.08);
+  game.camera.y = lerp(game.camera.y, ty, 0.08);
+  game.camera.x = clamp(game.camera.x, 0, MAP_W - canvas.width);
+  game.camera.y = clamp(game.camera.y, 0, MAP_H - canvas.height);
+}
+
+// ============================================================
+// RENDERING
+// ============================================================
+function drawGame() {
+  const cx = game.camera.x + screenShake.x;
+  const cy = game.camera.y + screenShake.y;
+
+  // Clear
+  ctx.fillStyle = '#c9a96e';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.save();
+  ctx.translate(-cx, -cy);
+
+  // Map border
+  ctx.strokeStyle = '#8b6914';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(0, 0, MAP_W, MAP_H);
+
+  // Sand dunes (background decorations)
+  for (const d of game.decos) {
+    if (d.type !== 'dune') continue;
+    if (d.x + d.size < cx || d.x - d.size > cx + canvas.width) continue;
+    if (d.y + d.size < cy || d.y - d.size > cy + canvas.height) continue;
+    ctx.fillStyle = `rgba(210, 180, 110, ${0.3 * d.shade})`;
+    ctx.beginPath();
+    ctx.ellipse(d.x, d.y, d.size, d.size * 0.5, 0.3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Rocks and cacti
+  for (const d of game.decos) {
+    if (d.type === 'dune') continue;
+    if (d.x < cx - 30 || d.x > cx + canvas.width + 30) continue;
+    if (d.y < cy - 30 || d.y > cy + canvas.height + 30) continue;
+    if (d.type === 'rock') {
+      ctx.fillStyle = '#9e9e8e';
+      ctx.beginPath();
+      ctx.ellipse(d.x, d.y, d.size, d.size * 0.7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(0,0,0,0.1)';
+      ctx.beginPath();
+      ctx.ellipse(d.x + 3, d.y + 3, d.size, d.size * 0.7, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (d.type === 'cactus') {
+      ctx.fillStyle = '#3a7a3a';
+      // Trunk
+      ctx.fillRect(d.x - 3, d.y - d.size, 6, d.size * 2);
+      // Arms
+      ctx.fillRect(d.x - 3 - 8, d.y - d.size * 0.6, 8, 5);
+      ctx.fillRect(d.x - 3 - 8, d.y - d.size * 0.6, 5, -10);
+      ctx.fillRect(d.x + 3, d.y - d.size * 0.3, 10, 5);
+      ctx.fillRect(d.x + 8, d.y - d.size * 0.3, 5, -12);
+    }
+  }
+
+  // Zone overlay
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(cx - 10, cy - 10, canvas.width + 20, canvas.height + 20);
+  ctx.arc(game.zone.x, game.zone.y, game.zone.radius, 0, Math.PI * 2, true);
+  const pulseAlpha = 0.12 + Math.sin(frame * 0.05) * 0.04;
+  ctx.fillStyle = `rgba(147, 51, 234, ${pulseAlpha})`;
+  ctx.fill();
+  ctx.restore();
+
+  // Zone border
+  ctx.beginPath();
+  ctx.arc(game.zone.x, game.zone.y, game.zone.radius, 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(147, 51, 234, ${0.5 + Math.sin(frame * 0.08) * 0.3})`;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  // Chests
+  for (const c of game.chests) {
+    if (c.x < cx - 30 || c.x > cx + canvas.width + 30) continue;
+    if (c.y < cy - 30 || c.y > cy + canvas.height + 30) continue;
+    if (c.opened) {
+      ctx.fillStyle = '#7a6a5a';
+      ctx.fillRect(c.x - CHEST_SIZE / 2, c.y - CHEST_SIZE / 2, CHEST_SIZE, CHEST_SIZE * 0.6);
+      // Open lid
+      ctx.fillStyle = '#6a5a4a';
+      ctx.fillRect(c.x - CHEST_SIZE / 2 - 2, c.y - CHEST_SIZE / 2 - 6, CHEST_SIZE + 4, 6);
+    } else {
+      // Closed chest
+      ctx.fillStyle = '#b8860b';
+      ctx.fillRect(c.x - CHEST_SIZE / 2, c.y - CHEST_SIZE / 2, CHEST_SIZE, CHEST_SIZE);
+      ctx.fillStyle = '#daa520';
+      ctx.fillRect(c.x - CHEST_SIZE / 2, c.y - CHEST_SIZE / 2, CHEST_SIZE, 4);
+      ctx.fillRect(c.x - 3, c.y - 3, 6, 6);
+      // Sparkle
+      if (frame % 40 < 20) {
+        ctx.fillStyle = 'rgba(255,215,0,0.4)';
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, CHEST_SIZE * 0.8 + Math.sin(frame * 0.1) * 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  // Projectiles
+  for (const pr of game.projectiles) {
+    if (pr.explosive) {
+      // Dynamite
+      ctx.fillStyle = '#8b4513';
+      ctx.beginPath();
+      ctx.arc(pr.x, pr.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+      // Fuse spark
+      ctx.fillStyle = '#ff4500';
+      ctx.beginPath();
+      ctx.arc(pr.x - pr.vx * 1.5, pr.y - pr.vy * 1.5, 3, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // Arrow
+      ctx.strokeStyle = '#5c3a1e';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(pr.x - pr.vx * 2, pr.y - pr.vy * 2);
+      ctx.lineTo(pr.x + pr.vx, pr.y + pr.vy);
+      ctx.stroke();
+      // Arrowhead
+      ctx.fillStyle = '#888';
+      ctx.beginPath();
+      ctx.arc(pr.x + pr.vx, pr.y + pr.vy, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Players
+  const sortedPlayers = [...game.players].sort((a, b) => a.y - b.y);
+  for (const p of sortedPlayers) {
+    if (!p.alive) continue;
+    if (p.x < cx - 50 || p.x > cx + canvas.width + 50) continue;
+    if (p.y < cy - 50 || p.y > cy + canvas.height + 50) continue;
+
+    // Shield effect
+    if (p.fx.shield > 0) {
+      ctx.strokeStyle = `rgba(167, 139, 250, ${0.4 + Math.sin(frame * 0.1) * 0.2})`;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, PLAYER_R + 6, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.beginPath();
+    ctx.ellipse(p.x + 3, p.y + PLAYER_R - 2, PLAYER_R * 0.8, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Body
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, PLAYER_R, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Direction indicator
+    const dx = Math.cos(p.dir) * (PLAYER_R + 4);
+    const dy = Math.sin(p.dir) * (PLAYER_R + 4);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(p.x + dx * 0.6, p.y + dy * 0.6, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Attack animation
+    if (p.atkAnim > 0) {
+      const weapon = getWeapon(p);
+      if (weapon && !weapon.ranged) {
+        const swingAngle = (1 - p.atkAnim / 15) * Math.PI;
+        ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, weapon.range,
+          p.dir - Math.PI * 0.5 + swingAngle * 0.3,
+          p.dir + Math.PI * 0.3 + swingAngle * 0.3);
+        ctx.stroke();
+      }
+    }
+
+    // Health bar
+    const barW = 36, barH = 5;
+    const barX = p.x - barW / 2, barY = p.y - PLAYER_R - 14;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+    const hpRatio = p.hp / p.maxHp;
+    const hpColor = hpRatio > 0.6 ? '#4ade80' : hpRatio > 0.3 ? '#fbbf24' : '#ef4444';
+    ctx.fillStyle = hpColor;
+    ctx.fillRect(barX, barY, barW * hpRatio, barH);
+
+    // Name
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(p.name, p.x, barY - 4);
+  }
+
+  // Particles
+  for (const p of game.particles) {
+    const alpha = p.life / p.maxLife;
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Floating texts
+  for (const ft of game.floatingTexts) {
+    const alpha = Math.min(1, ft.life / 20);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = ft.color;
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(ft.text, ft.x, ft.y);
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.restore();
+
+  // Minimap
+  drawMinimap();
+}
+
+function drawMinimap() {
+  const mmSize = 140;
+  const mmX = canvas.width - mmSize - 15;
+  const mmY = canvas.height - mmSize - 15;
+  const scale = mmSize / MAP_W;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(mmX - 2, mmY - 2, mmSize + 4, mmSize + 4);
+  ctx.fillStyle = '#b8a060';
+  ctx.fillRect(mmX, mmY, mmSize, mmSize);
+
+  // Zone
+  ctx.beginPath();
+  ctx.arc(mmX + game.zone.x * scale, mmY + game.zone.y * scale, game.zone.radius * scale, 0, Math.PI * 2);
+  ctx.strokeStyle = '#9333ea';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Chests
+  for (const c of game.chests) {
+    if (c.opened) continue;
+    ctx.fillStyle = '#ffd700';
+    ctx.fillRect(mmX + c.x * scale - 1, mmY + c.y * scale - 1, 2, 2);
+  }
+
+  // Players
+  for (const p of game.players) {
+    if (!p.alive) continue;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(mmX + p.x * scale, mmY + p.y * scale, p.isBot ? 2.5 : 4, 0, Math.PI * 2);
+    ctx.fill();
+    if (!p.isBot) {
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+}
+
+// ============================================================
+// UI UPDATES
+// ============================================================
+function updateUI() {
+  if (!game) return;
+  const p = game.players[0];
+
+  // Alive count
+  const alive = game.players.filter(q => q.alive).length;
+  document.getElementById('alive-count').textContent = 'Alive: ' + alive + '/11';
+
+  // HP bar
+  if (p.alive) {
+    const ratio = p.hp / p.maxHp;
+    document.getElementById('hp-bar').style.width = (ratio * 100) + '%';
+    document.getElementById('hp-text').textContent = 'HP: ' + p.hp + '/' + p.maxHp;
+  }
+
+  // Inventory
+  let invHTML = '';
+  for (let i = 0; i < INV_SIZE; i++) {
+    const item = p.inv[i];
+    const active = (i === p.slot) ? ' active' : '';
+    const emoji = item ? item.emoji : '';
+    const name = item ? item.name : '';
+    invHTML += `<div class="inv-slot${active}"><span class="key-hint">${i + 1}</span>${emoji}<span class="item-name">${name}</span></div>`;
+  }
+  document.getElementById('inventory-bar').innerHTML = invHTML;
+
+  // Kill feed
+  let kfHTML = '';
+  for (const k of game.killfeed) {
+    const alpha = Math.min(1, k.life / 60);
+    kfHTML += `<div class="kill-msg" style="opacity:${alpha}">
+      <span style="color:${k.kColor}">${k.killer}</span>
+      <span style="color:#888"> eliminated </span>
+      <span style="color:${k.vColor}">${k.victim}</span>
+    </div>`;
+  }
+  document.getElementById('killfeed').innerHTML = kfHTML;
+
+  // Effects
+  let efHTML = '';
+  if (p.fx.speed > 0) efHTML += `<div class="effect-icon">\u{1F4A8} ${Math.ceil(p.fx.speed / 60)}s</div>`;
+  if (p.fx.shield > 0) efHTML += `<div class="effect-icon">\u{1F6E1} ${Math.ceil(p.fx.shield / 60)}s</div>`;
+  document.getElementById('effects-bar').innerHTML = efHTML;
+}
+
+// ============================================================
+// MAIN GAME LOOP
+// ============================================================
+function gameLoop() {
+  if (gamePhase !== 'playing') return;
+  frame++;
+  const player = game.players[0];
+
+  // Player movement
+  if (player.alive) {
+    const spd = player.speed * (player.fx.speed > 0 ? 1.8 : 1);
+    let mx = 0, my = 0;
+    if (keys['ArrowUp'] || keys['KeyW']) my -= 1;
+    if (keys['ArrowDown'] || keys['KeyS']) my += 1;
+    if (keys['ArrowLeft'] || keys['KeyA']) mx -= 1;
+    if (keys['ArrowRight'] || keys['KeyD']) mx += 1;
+    if (mx || my) {
+      const len = Math.hypot(mx, my);
+      player.x += (mx / len) * spd;
+      player.y += (my / len) * spd;
+      player.dir = Math.atan2(my, mx);
+    }
+    player.x = clamp(player.x, PLAYER_R, MAP_W - PLAYER_R);
+    player.y = clamp(player.y, PLAYER_R, MAP_H - PLAYER_R);
+
+    if (player.atkCD > 0) player.atkCD--;
+    if (player.atkAnim > 0) player.atkAnim--;
+    if (player.fx.speed > 0) player.fx.speed--;
+    if (player.fx.shield > 0) player.fx.shield--;
+  }
+
+  // Update bots
+  for (let i = 1; i < game.players.length; i++) {
+    updateBot(game.players[i]);
+  }
+
+  // Update projectiles, zone, particles
+  updateProjectiles();
+  updateZone();
+  updateParticles();
+  updateShake();
+  updateKillfeed();
+  updateCamera();
+
+  // Draw
+  drawGame();
+  updateUI();
+
+  requestAnimationFrame(gameLoop);
+}
+
+// ============================================================
+// START SCREEN
+// ============================================================
+function showStart() {
+  gamePhase = 'start';
+  const W = canvas.width, H = canvas.height;
+
+  // Desert background
+  ctx.fillStyle = '#c9a96e';
+  ctx.fillRect(0, 0, W, H);
+
+  // Decorative dunes
+  ctx.fillStyle = 'rgba(180,150,90,0.3)';
+  ctx.beginPath(); ctx.ellipse(W * 0.2, H * 0.7, 200, 60, -0.2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(W * 0.8, H * 0.3, 160, 50, 0.3, 0, Math.PI * 2); ctx.fill();
+
+  const cx = W / 2;
+  let y = H / 2 - 110;
+
+  // Title
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 56px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('DESERT BATTLE', cx, y);
+
+  y += 40;
+  ctx.font = '20px sans-serif';
+  ctx.fillStyle = '#ddd';
+  ctx.fillText('Last one standing wins', cx, y);
+
+  // Difficulty selection
+  y += 55;
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Select difficulty:', cx, y);
+
+  const options = [
+    { key: '1', d: DIFFICULTIES.easy, color: '#4ade80' },
+    { key: '2', d: DIFFICULTIES.normal, color: '#fbbf24' },
+    { key: '3', d: DIFFICULTIES.hard, color: '#ef4444' },
+  ];
+
+  y += 15;
+  for (const opt of options) {
+    y += 42;
+    // Box background
+    const boxW = 340, boxH = 34;
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath();
+    ctx.roundRect(cx - boxW / 2, y - boxH / 2 - 6, boxW, boxH, 8);
+    ctx.fill();
+
+    // Key badge
+    ctx.fillStyle = opt.color;
+    ctx.beginPath();
+    ctx.roundRect(cx - boxW / 2 + 10, y - 14, 28, 24, 5);
+    ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.fillText(opt.key, cx - boxW / 2 + 24, y + 4);
+
+    // Label
+    ctx.fillStyle = opt.color;
+    ctx.font = 'bold 20px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(opt.d.label, cx - boxW / 2 + 50, y + 4);
+
+    // Description
+    ctx.fillStyle = '#bbb';
+    ctx.font = '13px sans-serif';
+    ctx.fillText(opt.d.desc, cx - boxW / 2 + 130, y + 4);
+
+    ctx.textAlign = 'center';
+  }
+
+  // Controls hint
+  y += 55;
+  ctx.font = '13px sans-serif';
+  ctx.fillStyle = '#888';
+  ctx.fillText('Arrows: Move | Space: Attack | E: Open Chest | 1-4: Items', cx, y);
+
+  // Clear UI elements
+  document.getElementById('controls-hint').textContent = '';
+  document.getElementById('alive-count').textContent = '';
+  document.getElementById('hp-text').textContent = '';
+  document.getElementById('hp-bar').style.width = '0%';
+  document.getElementById('inventory-bar').innerHTML = '';
+  document.getElementById('killfeed').innerHTML = '';
+  document.getElementById('effects-bar').innerHTML = '';
+  document.getElementById('center-msg').style.display = 'none';
+}
+
+showStart();
+</script>
+</body>
+</html>
